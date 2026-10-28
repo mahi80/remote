@@ -1,0 +1,14 @@
+# build output
+bin/
+*.exe
+*.pdb
+
+# local state that must never be committed
+*.pfx
+*.log
+known_hosts.txt
+
+# IDE
+.vs/
+*.user
+*.suo
