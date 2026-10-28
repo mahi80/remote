@@ -22,6 +22,13 @@ namespace Viewer
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
+            string relay = cli.Get("relay");
+            if (relay != null)
+            {
+                ConnectViaRelay(relay, cli);
+                return;
+            }
+
             string target = cli.Get("connect");
             if (target == null)
             {
@@ -31,7 +38,7 @@ namespace Viewer
 
             string host;
             int port;
-            if (!ParseTarget(target, out host, out port))
+            if (!Endpoint.TryParse(target, out host, out port))
             {
                 MessageBox.Show("Use --connect host:port", "RemoteDesktop viewer");
                 return;
@@ -54,16 +61,40 @@ namespace Viewer
             }
         }
 
-        private static bool ParseTarget(string target, out string host, out int port)
+        private static void ConnectViaRelay(string relay, CliArgs cli)
         {
-            host = null;
-            port = 0;
+            string relayHost;
+            int relayPort;
+            if (!Endpoint.TryParse(relay, out relayHost, out relayPort))
+            {
+                MessageBox.Show("Use --relay host:port", "RemoteDesktop viewer");
+                return;
+            }
 
-            int colon = target.LastIndexOf(':');
-            if (colon <= 0 || colon == target.Length - 1) return false;
+            string code = cli.Get("code");
+            if (!SessionCodes.Valid(code))
+            {
+                MessageBox.Show("Relay mode needs --code <session code>.", "RemoteDesktop viewer");
+                return;
+            }
 
-            host = target.Substring(0, colon);
-            return int.TryParse(target.Substring(colon + 1), out port);
+            string passcode = cli.Get("passcode") ?? "";
+            string target = relayHost + ":" + relayPort;
+
+            try
+            {
+                SslStream stream = Client.ConnectViaRelayAsync(relayHost, relayPort, code, passcode,
+                        cli.Has("trust-new"), null, CancellationToken.None)
+                    .GetAwaiter().GetResult();
+
+                Log.Write("connected to relay " + target + " (waiting for frames)");
+                Application.Run(new RemoteForm(stream, target));
+            }
+            catch (Exception ex)
+            {
+                Log.Write("connect failed: " + ex.Message);
+                MessageBox.Show(ex.Message, "RemoteDesktop viewer", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
     }
 }

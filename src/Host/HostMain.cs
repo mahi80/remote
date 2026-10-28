@@ -34,7 +34,31 @@ namespace Host
             string passcode = cli.Get("passcode") ?? Passcodes.New();
             string certPath = cli.Get("cert") ?? Path.Combine(AppContext.BaseDirectory, "host.pfx");
 
-            Application.Run(new MainForm(bind, port, passcode, certPath));
+            string relay = cli.Get("relay");
+            string relayHost = null;
+            int relayPort = 0;
+            if (relay != null && !Endpoint.TryParse(relay, out relayHost, out relayPort))
+            {
+                MessageBox.Show("Use --relay host:port (for example --relay relay.example.com:5056).",
+                    "RemoteDesktop host");
+                return;
+            }
+
+            string code = cli.Get("code");
+            if (relayHost != null)
+            {
+                if (code == null)
+                {
+                    code = SessionCodes.New();
+                }
+                else if (!SessionCodes.Valid(code))
+                {
+                    MessageBox.Show("--code must be 6 to 12 digits.", "RemoteDesktop host");
+                    return;
+                }
+            }
+
+            Application.Run(new MainForm(bind, port, passcode, code, certPath, relayHost, relayPort));
         }
     }
 }

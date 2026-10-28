@@ -14,9 +14,12 @@ namespace Host
         private readonly string _bindAddress;
         private readonly int _port;
         private readonly string _certPath;
+        private readonly string _relayHost;
+        private readonly int _relayPort;
         private readonly float _scale;
 
         private readonly Label _passcodeLabel;
+        private readonly Label _codeLabel;
         private readonly Label _statusLabel;
         private readonly Label _addressLabel;
         private readonly TextBox _fingerprintBox;
@@ -24,17 +27,24 @@ namespace Host
         private readonly Button _toggleButton;
         private readonly NotifyIcon _tray;
 
-        private SessionServer _server;
+        private ISessionSource _source;
+        private X509Certificate2 _certificate;
         private string _passcode;
+        private string _code;
         private bool _running;
         private bool _exiting;
 
-        public MainForm(string bindAddress, int port, string passcode, string certPath)
+        public MainForm(string bindAddress, int port, string passcode, string code, string certPath,
+                        string relayHost, int relayPort)
         {
             _bindAddress = bindAddress;
             _port = port;
             _certPath = certPath;
+            _relayHost = relayHost;
+            _relayPort = relayPort;
             _passcode = passcode;
+            _code = code ?? "";
+            bool relayMode = _relayHost != null;
 
             AutoScaleMode = AutoScaleMode.None;
             using (Graphics probe = CreateGraphics()) _scale = probe.DpiX / 96f;
@@ -65,29 +75,38 @@ namespace Host
             _passcodeLabel.AutoSize = true;
 
             _addressLabel = new Label();
-            _addressLabel.Text = DescribeAddress();
+            _addressLabel.Text = relayMode ? "Relay: " + _relayHost + ":" + _relayPort : DescribeAddress();
             _addressLabel.Location = new Point(S(18), S(124));
             _addressLabel.AutoSize = true;
             _addressLabel.ForeColor = Color.DimGray;
+
+            _codeLabel = new Label();
+            _codeLabel.Text = "Session code: " + _code;
+            _codeLabel.Font = new Font("Consolas", 13F, FontStyle.Bold);
+            _codeLabel.Location = new Point(S(16), S(142));
+            _codeLabel.AutoSize = true;
+            _codeLabel.Visible = relayMode;
+
+            int shift = relayMode ? S(26) : 0;
 
             _fingerprintBox = new TextBox();
             _fingerprintBox.ReadOnly = true;
             _fingerprintBox.BorderStyle = BorderStyle.None;
             _fingerprintBox.BackColor = SystemColors.Control;
-            _fingerprintBox.Location = new Point(S(18), S(148));
+            _fingerprintBox.Location = new Point(S(18), S(148) + shift);
             _fingerprintBox.Width = S(544);
             _fingerprintBox.TabStop = false;
 
             _statusLabel = new Label();
             _statusLabel.Text = "Starting...";
             _statusLabel.Font = new Font("Segoe UI", 10F, FontStyle.Bold);
-            _statusLabel.Location = new Point(S(18), S(174));
+            _statusLabel.Location = new Point(S(18), S(174) + shift);
             _statusLabel.AutoSize = true;
             _statusLabel.ForeColor = Color.DimGray;
 
             _logBox = new ListBox();
-            _logBox.Location = new Point(S(18), S(204));
-            _logBox.Size = new Size(S(544), S(190));
+            _logBox.Location = new Point(S(18), S(204) + shift);
+            _logBox.Size = new Size(S(544), S(190) - shift);
             _logBox.HorizontalScrollbar = true;
 
             _toggleButton = new Button();
@@ -100,16 +119,24 @@ namespace Host
             newPasscodeButton.Location = new Point(S(148), S(410));
             newPasscodeButton.Size = new Size(S(130), S(32));
 
+            Button newCodeButton = new Button();
+            newCodeButton.Text = "New code";
+            newCodeButton.Location = new Point(S(288), S(410));
+            newCodeButton.Size = new Size(S(120), S(32));
+            newCodeButton.Visible = relayMode;
+
             Label hint = new Label();
-            hint.Text = "Closing this window keeps the host listening in the tray. Every connection needs your approval.";
+            hint.Text = relayMode
+                ? "Closing this window keeps the host connected through the relay. Every connection needs your approval."
+                : "Closing this window keeps the host listening in the tray. Every connection needs your approval.";
             hint.Location = new Point(S(18), S(454));
             hint.Size = new Size(S(544), S(34));
             hint.ForeColor = Color.DimGray;
 
             Controls.AddRange(new Control[]
             {
-                title, passHint, _passcodeLabel, _addressLabel, _fingerprintBox,
-                _statusLabel, _logBox, _toggleButton, newPasscodeButton, hint
+                title, passHint, _passcodeLabel, _addressLabel, _codeLabel, _fingerprintBox,
+                _statusLabel, _logBox, _toggleButton, newPasscodeButton, newCodeButton, hint
             });
 
             _toggleButton.Click += delegate
@@ -122,8 +149,20 @@ namespace Host
             {
                 _passcode = Passcodes.New();
                 _passcodeLabel.Text = _passcode;
-                if (_server != null) _server.Passcode = _passcode;
+                if (_source != null) _source.Passcode = _passcode;
                 AppendLog("New passcode generated.");
+            };
+
+            newCodeButton.Click += delegate
+            {
+                _code = SessionCodes.New();
+                _codeLabel.Text = "Session code: " + _code;
+                AppendLog("New session code: " + _code + ".");
+                if (_running)
+                {
+                    StopServer();
+                    StartServer();
+                }
             };
 
             ContextMenuStrip menu = new ContextMenuStrip();
@@ -178,16 +217,22 @@ namespace Host
 
             try
             {
-                X509Certificate2 certificate = Tls.LoadOrCreateHostCertificate(_certPath);
-                _fingerprintBox.Text = "Certificate SHA-256: " + Tls.Fingerprint(certificate);
+                _certificate = Tls.LoadOrCreateHostCertificate(_certPath);
+                _fingerprintBox.Text = "Certificate SHA-256: " + Tls.Fingerprint(_certificate);
 
-                _server = new SessionServer(_bindAddress, _port, _passcode, certificate);
-                _server.Logged += AppendLog;
-                _server.ConsentRequested += AskConsentAsync;
-                _server.SessionStarted += OnSessionStarted;
-                _server.SessionEnded += OnSessionEnded;
-                _server.Start();
+                ISessionSource source;
+                if (_relayHost == null)
+                    source = new SessionServer(_bindAddress, _port, _passcode, _certificate);
+                else
+                    source = new RelayHost(_relayHost, _relayPort, _code, _passcode, _certificate);
 
+                source.Logged += AppendLog;
+                source.ConsentRequested += AskConsentAsync;
+                source.SessionStarted += OnSessionStarted;
+                source.SessionEnded += OnSessionEnded;
+                source.Start();
+
+                _source = source;
                 _running = true;
                 _toggleButton.Text = "Stop";
                 SetStatus("Waiting for a connection", Color.DarkGreen);
@@ -196,15 +241,30 @@ namespace Host
             {
                 AppendLog("Failed to start: " + ex.Message);
                 SetStatus("Not listening: " + ex.Message, Color.Firebrick);
+                if (_source != null)
+                {
+                    _source.Dispose();
+                    _source = null;
+                }
+                if (_certificate != null)
+                {
+                    _certificate.Dispose();
+                    _certificate = null;
+                }
             }
         }
 
         private void StopServer()
         {
-            if (_server != null)
+            if (_source != null)
             {
-                _server.Dispose();
-                _server = null;
+                _source.Dispose();
+                _source = null;
+            }
+            if (_certificate != null)
+            {
+                _certificate.Dispose();
+                _certificate = null;
             }
             _running = false;
             _toggleButton.Text = "Start";
@@ -298,10 +358,15 @@ namespace Host
                 return;
             }
 
-            if (_server != null)
+            if (_source != null)
             {
-                _server.Dispose();
-                _server = null;
+                _source.Dispose();
+                _source = null;
+            }
+            if (_certificate != null)
+            {
+                _certificate.Dispose();
+                _certificate = null;
             }
 
             _tray.Visible = false;

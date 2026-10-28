@@ -2,9 +2,11 @@
 
 A small, readable remote-desktop tool for Windows: a **host** that shares its screen and accepts remote mouse/keyboard input, and a **viewer** that connects to it.
 
-It is intentionally minimal — two WinForms apps, no installer, no service, no dependencies. Everything builds with the C# compiler that ships with Windows.
+It is intentionally minimal — two WinForms apps and a small relay, no installer, no service, no dependencies. Everything builds with the C# compiler that ships with Windows.
 
 Sessions are **consent-gated and fully visible**: the host window is always on screen, and every connection must be approved by a person at the host machine within 30 seconds.
+
+It works on a local network by connecting directly to the host, and across networks through a small relay server. In relay mode the host dials out, so it does not need an open port or any router configuration.
 
 ## What it does
 
@@ -14,6 +16,7 @@ Sessions are **consent-gated and fully visible**: the host window is always on s
 - Six-digit one-time passcode, regenerable from the host window
 - One active session at a time
 - Tray icon, so the host keeps running while its window is closed
+- **Relay mode** for connections across networks: the host and viewer both dial out to a relay server, match on a nine-digit session code, and then run the same end-to-end TLS session through it
 
 ## What it does not do
 
@@ -43,6 +46,7 @@ Output goes to `bin/`:
 | --- | --- |
 | `bin/RemoteDesktop.Host.exe` | The machine being controlled |
 | `bin/RemoteDesktop.Viewer.exe` | The machine doing the controlling |
+| `bin/RemoteDesktop.Relay.exe` | Relay server for connections across networks (console app) |
 | `bin/Smoke.exe` | Headless end-to-end self-test |
 
 The script calls `csc.exe` from `C:\Windows\Microsoft.NET\Framework64\v4.0.30319` and compiles with `-langversion:5`, so the source stays compatible with the in-box compiler.
@@ -58,7 +62,7 @@ bin/RemoteDesktop.Host.exe
 The window shows:
 
 - a **passcode** (six digits, changes when you press *New passcode*)
-- the **listening address and port**
+- the **listening address and port**, or the **session code** in relay mode
 - the certificate **fingerprint**
 
 Options:
@@ -68,13 +72,15 @@ Options:
 --port <number>      listen port             (default 5055)
 --passcode <digits>  fixed passcode          (default: random per launch)
 --cert <path>        certificate file        (default: host.pfx next to the exe)
+--relay <host:port>  use relay mode instead of listening (see below)
+--code <digits>      session code for relay  (default: random nine digits)
 --log <path>         write a log file
 --inject-test        run the input-injection self-test and exit
 ```
 
 The certificate (`host.pfx`, including its private key) is created on first run and reused afterward. Keep it local — it is in `.gitignore`.
 
-Allow inbound TCP on the chosen port if Windows Firewall prompts, or add the rule yourself. For same-machine testing, use `--bind 127.0.0.1`.
+Allow inbound TCP on the chosen port if Windows Firewall prompts, or add the rule yourself. For same-machine testing, use `--bind 127.0.0.1`. Relay mode listens for nothing; only outbound access to the relay is needed.
 
 Closing the window keeps the host listening from the notification area. Use the **Stop** button (it becomes **Start** again) or the tray menu's *Stop listening* to stop accepting connections, and *Exit* to quit.
 
@@ -94,6 +100,8 @@ bin/RemoteDesktop.Viewer.exe --connect 192.168.1.20:5055 --passcode 123456
 
 ```
 --connect <host:port>  connect without opening the dialog
+--relay <host:port>    connect through a relay instead (requires --code)
+--code <digits>        session code shown by the relay-mode host
 --passcode <digits>    passcode for that host
 --trust-new            accept an unknown host fingerprint without prompting
 --log <path>           write a log file
@@ -101,11 +109,43 @@ bin/RemoteDesktop.Viewer.exe --connect 192.168.1.20:5055 --passcode 123456
 
 The viewer opens a window sized to 80% of your screen and mirrors the host's desktop inside it. Mouse movement, clicks, wheel, and typing are forwarded. Press **Esc** to disconnect.
 
+The connect dialog has the same fields: host address and port for direct mode, and the optional **Relay host:port** plus **Session code** boxes for relay mode.
+
+### Across networks (relay)
+
+Direct mode needs a reachable TCP port on the host, which usually means port forwarding or a VPN. Relay mode avoids that: both sides make outgoing connections to a relay server, and the relay joins them by a session code.
+
+1. Deploy the relay somewhere both machines can reach:
+
+   ```bash
+   bin/RemoteDesktop.Relay.exe --port 5056
+   ```
+
+   Options: `--bind <address>` (default `0.0.0.0`), `--port <number>` (default `5056`), `--log <path>`. Allow inbound TCP on the relay's port and keep it running. It is a plain console app with no state beyond connected sockets.
+
+2. Start the host in relay mode:
+
+   ```bash
+   bin/RemoteDesktop.Host.exe --relay relay.example.com:5056
+   ```
+
+   The window shows a **session code** (nine digits) instead of a listening address. **New code** generates a fresh one and re-registers; the host stays connected to the relay in the background, reconnects after each session, and needs no inbound firewall rule.
+
+3. Connect the viewer:
+
+   ```bash
+   bin/RemoteDesktop.Viewer.exe --relay relay.example.com:5056 --code 123456789 --passcode 246810
+   ```
+
+   Or enter the relay address and session code in the connect dialog. The session code only routes the two connections to each other; the viewer still needs the host's passcode, and someone at the host still has to click **Allow**.
+
+The relay forwards bytes it cannot read: TLS is negotiated directly between host and viewer, end to end, using the host's own certificate. Any bytes the relay sees are ciphertext.
+
 ### What happens on connect
 
-1. The viewer opens a TLS connection and checks the host certificate against `known_hosts.txt`. An unknown fingerprint prompts for confirmation and is remembered on acceptance (`--trust-new` skips the prompt).
+1. The viewer opens a TLS connection and checks the host certificate against `known_hosts.txt`. An unknown fingerprint prompts for confirmation and is remembered on acceptance (`--trust-new` skips the prompt). In relay mode the pinning key is the relay address, and several host fingerprints may be remembered behind one relay.
 2. The viewer sends the passcode. A wrong passcode closes the connection.
-3. The host shows a modal **Allow … to control this computer?** dialog naming the remote address. It auto-denies after 30 seconds. Nothing is shared or accepted until someone clicks **Allow**.
+3. The host shows a modal **Allow … to control this computer?** dialog naming the remote address (in relay mode it names the relay connection). It auto-denies after 30 seconds. Nothing is shared or accepted until someone clicks **Allow**.
 4. Video frames stream to the viewer, and input is accepted from that point on.
 
 The host window shows a red banner with the connected address while a session is active, and logs connect/disconnect events.
@@ -116,29 +156,34 @@ The host window shows a red banner with the connected address while a session is
 bin/Smoke.exe
 ```
 
-Runs the whole protocol in-process over loopback: starts a host on a free port with auto-approved consent, checks that a wrong passcode is rejected, receives and decodes three frames, verifies a mouse move round-trips to the correct coordinates, and expects exactly one consent request. Prints `PASS` and exits 0, or `FAIL` and exits 1.
+Runs the whole protocol in-process over loopback: starts a host on a free port with auto-approved consent, checks that a wrong passcode is rejected, receives and decodes three frames, verifies a mouse move round-trips to the correct coordinates, and expects exactly one consent request. It then repeats the session through an in-process relay: registers a relay-mode host, connects a viewer with the session code, receives frames, verifies the mouse round-trip, and checks that a wrong passcode is rejected through the relay too. Prints `PASS` and exits 0, or `FAIL` and exits 1.
 
 ## Limitations
 
 - **Frame rate** is roughly 4–10 fps depending on screen size and change rate; this is a JPEG-over-TCP prototype, not a low-latency codec.
 - **Input coverage** is limited to ordinary desktop applications (see *What it does not do*).
-- **Single host, single session.** No relay, no NAT traversal, no discovery. Use a VPN or port forwarding for access across networks.
+- **One host, one viewer, one session at a time.** There is no NAT traversal, discovery, or automatic relay selection — relay mode needs a relay address you provide.
+- **Relay latency.** Every frame goes host → relay → viewer, so throughput and latency depend on the relay's location and bandwidth. The relay is untrusted for confidentiality, but it can observe traffic volume and connection metadata, and it can refuse service.
+- **Session codes are routing, not authentication.** A nine-digit code is short by design; the relay throttles guessing per IP and refuses concurrent pairing, but the real gates are the passcode and the host's **Allow** prompt.
 - **Self-signed certificate.** Identity is established by fingerprint pinning on first use; there is no CA.
-- **Unsigned binaries.** Windows SmartScreen and endpoint protection may warn or block; the executables are built locally, not signed.
+- **Unsigned binaries.** Windows SmartScreen, Smart App Control, and endpoint protection may warn or block; the executables are built locally, not signed.
 
 ## Security notes
 
 - Every session requires both the passcode and an explicit **Allow** click on the host.
 - The host window is visible at all times and appears normally in the taskbar and process list. There is no hidden mode.
 - Passcodes are compared in constant time and never written to the log.
+- TLS runs end to end between host and viewer, including through the relay. The relay cannot decrypt screen or input data.
+- The relay only pairs connections; it does not authenticate them. Use a relay you control or trust, and prefer HTTPS-like trust in the host fingerprint prompt.
 - `host.pfx` and `known_hosts.txt` are deliberately excluded from version control. Do not commit them.
 
 ## Layout
 
 ```
 build.sh              in-box csc build
-src/Shared/           protocol framing, TLS, CLI, logging
-src/Host/             screen capture, input injection, session server, host UI
-src/Viewer/           client, known-hosts store, connect + remote UI
+src/Shared/           protocol framing, TLS, CLI, logging, session codes
+src/Host/             screen capture, input injection, direct + relay session sources, host UI
+src/Viewer/           client (direct and relay), known-hosts store, connect + remote UI
+src/Relay/            relay server that pairs host and viewer by session code
 src/Smoke/            headless end-to-end test
 ```

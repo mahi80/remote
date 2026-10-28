@@ -55,4 +55,28 @@ namespace Shared
             return (BitConverter.ToUInt32(bytes, 0) % 1000000).ToString("D6");
         }
     }
+
+    public static class SessionCodes
+    {
+        public static string New()
+        {
+            byte[] bytes = new byte[4];
+            using (RandomNumberGenerator rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(bytes);
+            }
+            return (BitConverter.ToUInt32(bytes, 0) % 1000000000UL).ToString("D9");
+        }
+
+        public static bool Valid(string code)
+        {
+            if (code == null || code.Length < 6 || code.Length > 12) return false;
+
+            for (int i = 0; i < code.Length; i++)
+            {
+                if (code[i] < '0' || code[i] > '9') return false;
+            }
+            return true;
+        }
+    }
 }

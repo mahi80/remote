@@ -19,8 +19,12 @@ echo "viewer..."
 "$CSC" $COMMON -target:winexe -out:bin/RemoteDesktop.Viewer.exe -main:Viewer.ViewerMain \
     $REF $(srcs src/Shared/*.cs src/Viewer/*.cs)
 
+echo "relay..."
+"$CSC" $COMMON -target:exe -out:bin/RemoteDesktop.Relay.exe -main:Relay.RelayMain \
+    $REF $(srcs src/Shared/*.cs src/Relay/*.cs)
+
 echo "smoke..."
 "$CSC" $COMMON -target:exe -out:bin/Smoke.exe -main:Smoke.Program \
-    $REF $(srcs src/Shared/*.cs src/Host/*.cs src/Viewer/*.cs src/Smoke/*.cs)
+    $REF $(srcs src/Shared/*.cs src/Host/*.cs src/Viewer/*.cs src/Relay/*.cs src/Smoke/*.cs)
 
 echo "built -> bin/"

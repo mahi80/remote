@@ -11,6 +11,8 @@ namespace Viewer
     {
         private readonly TextBox _hostBox;
         private readonly NumericUpDown _portBox;
+        private readonly TextBox _relayBox;
+        private readonly TextBox _codeBox;
         private readonly TextBox _passcodeBox;
         private readonly Button _connectButton;
         private readonly Label _statusLabel;
@@ -51,6 +53,24 @@ namespace Viewer
             _portBox.Maximum = 65535;
             _portBox.Value = 5055;
 
+            Label relayLabel = new Label();
+            relayLabel.Text = "Relay host:port (optional)";
+            relayLabel.Location = new Point(S(138), S(74));
+            relayLabel.AutoSize = true;
+
+            _relayBox = new TextBox();
+            _relayBox.Location = new Point(S(138), S(96));
+            _relayBox.Width = S(172);
+
+            Label codeLabel = new Label();
+            codeLabel.Text = "Session code";
+            codeLabel.Location = new Point(S(318), S(74));
+            codeLabel.AutoSize = true;
+
+            _codeBox = new TextBox();
+            _codeBox.Location = new Point(S(318), S(96));
+            _codeBox.Width = S(100);
+
             Label passLabel = new Label();
             passLabel.Text = "Passcode shown on the host";
             passLabel.Location = new Point(S(18), S(132));
@@ -73,7 +93,11 @@ namespace Viewer
             AcceptButton = _connectButton;
             _connectButton.Click += OnConnect;
 
-            Controls.AddRange(new Control[] { hostLabel, _hostBox, portLabel, _portBox, passLabel, _passcodeBox, _connectButton, _statusLabel });
+            Controls.AddRange(new Control[]
+            {
+                hostLabel, _hostBox, portLabel, _portBox, relayLabel, _relayBox,
+                codeLabel, _codeBox, passLabel, _passcodeBox, _connectButton, _statusLabel
+            });
 
             Shown += delegate
             {
@@ -92,10 +116,28 @@ namespace Viewer
             string host = _hostBox.Text.Trim();
             int port = (int)_portBox.Value;
             string passcode = _passcodeBox.Text;
+            string relay = _relayBox.Text.Trim();
+            string code = _codeBox.Text.Trim();
 
-            if (host.Length == 0)
+            string relayHost = null;
+            int relayPort = 0;
+
+            if (relay.Length > 0)
             {
-                _statusLabel.Text = "Enter a host name or IP address.";
+                if (!Endpoint.TryParse(relay, out relayHost, out relayPort))
+                {
+                    _statusLabel.Text = "Enter the relay as host:port.";
+                    return;
+                }
+                if (!SessionCodes.Valid(code))
+                {
+                    _statusLabel.Text = "Enter the session code shown on the host.";
+                    return;
+                }
+            }
+            else if (host.Length == 0)
+            {
+                _statusLabel.Text = "Enter a host name or IP address, or a relay.";
                 return;
             }
 
@@ -104,10 +146,25 @@ namespace Viewer
 
             try
             {
-                SslStream stream = await Client.ConnectAsync(host, port, passcode, false, ConfirmFingerprint, CancellationToken.None);
+                SslStream stream;
+                string target;
+
+                if (relayHost != null)
+                {
+                    stream = await Client.ConnectViaRelayAsync(relayHost, relayPort, code, passcode, false,
+                        ConfirmFingerprint, CancellationToken.None);
+                    target = relayHost + ":" + relayPort;
+                }
+                else
+                {
+                    stream = await Client.ConnectAsync(host, port, passcode, false, ConfirmFingerprint,
+                        CancellationToken.None);
+                    target = host + ":" + port;
+                }
+
                 Hide();
 
-                RemoteForm remote = new RemoteForm(stream, host + ":" + port);
+                RemoteForm remote = new RemoteForm(stream, target);
                 remote.FormClosed += delegate { Close(); };
                 remote.Show();
             }
